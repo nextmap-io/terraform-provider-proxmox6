@@ -1,19 +1,29 @@
 package proxmox6
 
 import (
-		"crypto/tls"
-		"fmt"
-		"os"
-		"regexp"
-		"strconv"
-		"sync"
+	"crypto/tls"
+	"fmt"
+	"os"
+	"regexp"
+	"strconv"
+	"sync"
 
-		pxapi "github.com/Telmate/proxmox-api-go/proxmox"
-		"github.com/hashicorp/terraform-plugin-sdk/helper/schema"
+	"github.com/go-resty/resty/v2"
+	"github.com/hashicorp/terraform-plugin-sdk/helper/schema"
+	"github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 )
 
+var log = logrus.New()
+
+type credentials struct {
+	CSRFPreventionToken string `json:"CSRFPreventionToken"`
+	ticket              string `json:"ticket"`
+}
+
 type providerConfiguration struct {
-	Client          *pxapi.Client
+	Client          *resty.Client
+	Creds           *credentials
 	MaxParallel     int
 	CurrentParallel int
 	MaxVMID         int
@@ -22,94 +32,140 @@ type providerConfiguration struct {
 }
 
 func Provider() *schema.Provider {
-		pmOTPprompt := schema.Schema{
+	pmOTPprompt := schema.Schema{
+		Type:        schema.TypeString,
+		Optional:    true,
+		DefaultFunc: schema.EnvDefaultFunc("PM_OTP", ""),
+		Description: "OTP 2FA code (if required)",
+	}
+	if os.Getenv("PM_OTP_PROMPT") == "1" {
+		pmOTPprompt = schema.Schema{
 			Type:        schema.TypeString,
-			Optional:    true,
-			DefaultFunc: schema.EnvDefaultFunc("PM_OTP", ""),
+			Required:    true,
+			DefaultFunc: schema.EnvDefaultFunc("PM_OTP", nil),
 			Description: "OTP 2FA code (if required)",
 		}
-		if os.Getenv("PM_OTP_PROMPT") == "1" {
-			pmOTPprompt = schema.Schema{
+	}
+
+	return &schema.Provider{
+		Schema: map[string]*schema.Schema{
+
+			"pm_user": {
 				Type:        schema.TypeString,
-				Required:    true,
-				DefaultFunc: schema.EnvDefaultFunc("PM_OTP", nil),
-				Description: "OTP 2FA code (if required)",
-			}
-		}
+				Optional:    true,
+				DefaultFunc: schema.EnvDefaultFunc("PM_USER", nil),
+				Description: "username, maywith with @pam",
+			},
+			"pm_password": {
+				Type:        schema.TypeString,
+				Optional:    true,
+				DefaultFunc: schema.EnvDefaultFunc("PM_PASS", nil),
+				Description: "secret",
+				Sensitive:   true,
+			},
+			"pm_api_url": {
+				Type:        schema.TypeString,
+				Optional:    true,
+				DefaultFunc: schema.EnvDefaultFunc("PM_API_URL", nil),
+				Description: "https://host.fqdn:8006/api2/json",
+			},
+			"pm_parallel": {
+				Type:     schema.TypeInt,
+				Optional: true,
+				Default:  4,
+			},
+			"pm_tls_insecure": {
+				Type:     schema.TypeBool,
+				Optional: true,
+				Default:  false,
+			},
+			"pm_otp": &pmOTPprompt,
+		},
 
-        return &schema.Provider{
-				Schema: map[string]*schema.Schema{
+		ConfigureFunc: providerConfigure,
 
-					"pm_user": {
-						Type:        schema.TypeString,
-						Required:    true,
-						DefaultFunc: schema.EnvDefaultFunc("PM_USER", nil),
-						Description: "username, maywith with @pam",
-					},
-					"pm_password": {
-						Type:        schema.TypeString,
-						Required:    true,
-						DefaultFunc: schema.EnvDefaultFunc("PM_PASS", nil),
-						Description: "secret",
-						Sensitive:   true,
-					},
-					"pm_api_url": {
-						Type:        schema.TypeString,
-						Required:    true,
-						DefaultFunc: schema.EnvDefaultFunc("PM_API_URL", nil),
-						Description: "https://host.fqdn:8006/api2/json",
-					},
-					"pm_parallel": {
-						Type:     schema.TypeInt,
-						Optional: true,
-						Default:  4,
-					},
-					"pm_tls_insecure": {
-						Type:     schema.TypeBool,
-						Optional: true,
-						Default:  false,
-					},
-					"pm_otp": &pmOTPprompt,
-				},
-
-				ResourcesMap: map[string]*schema.Resource{
-					"proxmox6_pool": resourcePool(),
-				},
-        }
+		ResourcesMap: map[string]*schema.Resource{
+			"proxmox6_pool": resourcePool(),
+		},
+	}
 }
 
 func providerConfigure(d *schema.ResourceData) (interface{}, error) {
-	client, err := getClient(d.Get("pm_api_url").(string), d.Get("pm_user").(string), d.Get("pm_password").(string), d.Get("pm_otp").(string), d.Get("pm_tls_insecure").(bool))
+	file, ferr := os.OpenFile("logrus.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	if ferr == nil {
+		log.Out = file
+	} else {
+		log.Info("Failed to log to file, using default stderr")
+	}
+	log.SetFormatter(&logrus.TextFormatter{
+		DisableColors: true,
+		FullTimestamp: true,
+	})
+
+	log.SetLevel(logrus.DebugLevel)
+	log.Info("Initializing provider")
+	pmAPIURL := d.Get("pm_api_url").(string)
+	pmUser := d.Get("pm_user").(string)
+	pmPassword := d.Get("pm_password").(string)
+	pmTLSInsecure := d.Get("pm_tls_insecure").(bool)
+	pmOtp := d.Get("pm_otp").(string)
+
+	log.Debug("Getting a Proxmox ticket")
+	pxCreds := credentials{}
+
+	client := resty.New().
+		SetLogger(log).
+		SetHostURL(pmAPIURL).
+		SetDebug(true)
+
+	if pmTLSInsecure {
+		client.SetTLSClientConfig(&tls.Config{InsecureSkipVerify: true})
+	}
+
+	resp, err := client.R().
+		SetFormData(map[string]string{"username": pmUser, "password": pmPassword, "otp": pmOtp}).
+		Post("/api2/json/access/ticket")
+
+	log.Debugf("%v", resp.String())
+
+	pxCreds.CSRFPreventionToken = gjson.Get(resp.String(), "data.CSRFPreventionToken").String()
+	pxCreds.ticket = gjson.Get(resp.String(), "data.ticket").String()
+
 	if err != nil {
+		log.Fatal(err)
 		return nil, err
 	}
+
+	if pxCreds.ticket == "" {
+		log.Fatal("No ticket received, error")
+		return nil, fmt.Errorf("No ticket received, error")
+	}
+
 	var mut sync.Mutex
+
 	return &providerConfiguration{
 		Client:          client,
+		Creds:           &pxCreds,
 		MaxParallel:     d.Get("pm_parallel").(int),
 		CurrentParallel: 0,
 		MaxVMID:         -1,
 		Mutex:           &mut,
 		Cond:            sync.NewCond(&mut),
 	}, nil
+
 }
 
-func getClient(pm_api_url string, pm_user string, pm_password string, pm_otp string, pm_tls_insecure bool) (*pxapi.Client, error) {
-	tlsconf := &tls.Config{InsecureSkipVerify: true}
-	if !pm_tls_insecure {
-		tlsconf = nil
-	}
-	client, _ := pxapi.NewClient(pm_api_url, nil, tlsconf)
-	err := client.Login(pm_user, pm_password, pm_otp)
-	if err != nil {
-		return nil, err
-	}
-	return client, nil
+func pxNewRequest(providerConfiguration *providerConfiguration) *resty.Request {
+	requestClient := providerConfiguration.Client.R().
+		SetHeader("Cookie", fmt.Sprintf("PVEAuthCookie=%s", providerConfiguration.Creds.ticket)).
+		SetHeader("CSRFPreventionToken", providerConfiguration.Creds.CSRFPreventionToken)
+
+	return requestClient
 }
 
 func nextVMID(pconf *providerConfiguration) (nextID int, err error) {
 	pconf.Mutex.Lock()
-	pconf.MaxVMID, err = pconf.Client.GetnextID(pconf.MaxVMID + 1)
+	//pconf.MaxVMID, err = pconf.Client.GetnextID(pconf.MaxVMID + 1)
 	if err != nil {
 		return 0, err
 	}

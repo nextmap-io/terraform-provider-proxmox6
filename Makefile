@@ -25,5 +25,10 @@ install: build
 	cp bin/terraform-provider-proxmox6 $$GOPATH/bin/terraform-provider-proxmox6
 
 clean:
-	@git clean -f -d -X
+	@git clean -f -d -x -e "test/terraform.tfstate"
 
+test_provider: build 
+	@echo " -> testing provider"
+	mkdir -p test/terraform.d/plugins/darwin_amd64
+	cp bin/terraform-provider-proxmox6 test/terraform.d/plugins/darwin_amd64/
+	cd test && terraform init && TF_LOG=DEBUG terraform plan && TF_LOG=DEBUG terraform apply
