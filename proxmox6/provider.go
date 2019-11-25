@@ -10,7 +10,6 @@ import (
 
 		pxapi "github.com/Telmate/proxmox-api-go/proxmox"
 		"github.com/hashicorp/terraform-plugin-sdk/helper/schema"
-		"proxmox5"
 )
 
 type providerConfiguration struct {
@@ -74,7 +73,7 @@ func Provider() *schema.Provider {
 				},
 
 				ResourcesMap: map[string]*schema.Resource{
-					"proxmox5_pool": proxmox5.resourcePool(),
+					"proxmox6_pool": resourcePool(),
 				},
         }
 }
@@ -108,15 +107,15 @@ func getClient(pm_api_url string, pm_user string, pm_password string, pm_otp str
 	return client, nil
 }
 
-func nextVmId(pconf *providerConfiguration) (nextId int, err error) {
+func nextVMID(pconf *providerConfiguration) (nextID int, err error) {
 	pconf.Mutex.Lock()
-	pconf.MaxVMID, err = pconf.Client.GetNextID(pconf.MaxVMID + 1)
+	pconf.MaxVMID, err = pconf.Client.GetnextID(pconf.MaxVMID + 1)
 	if err != nil {
 		return 0, err
 	}
-	nextId = pconf.MaxVMID
+	nextID = pconf.MaxVMID
 	pconf.Mutex.Unlock()
-	return nextId, nil
+	return nextID, nil
 }
 
 func pmParallelBegin(pconf *providerConfiguration) {
@@ -135,19 +134,19 @@ func pmParallelEnd(pconf *providerConfiguration) {
 	pconf.Mutex.Unlock()
 }
 
-func resourceId(targetNode string, resType string, vmId int) string {
-	return fmt.Sprintf("%s/%s/%d", targetNode, resType, vmId)
+func resourceID(targetNode string, resType string, vmID int) string {
+	return fmt.Sprintf("%s/%s/%d", targetNode, resType, vmID)
 }
 
-var rxRsId = regexp.MustCompile("([^/]+)/([^/]+)/(\\d+)")
+var rxRsID = regexp.MustCompile("([^/]+)/([^/]+)/(\\d+)")
 
-func parseResourceId(resId string) (targetNode string, resType string, vmId int, err error) {
-	if !rxRsId.MatchString(resId) {
-		return "", "", -1, fmt.Errorf("Invalid resource format: %s. Must be node/type/vmId", resId)
+func parseResourceID(resID string) (targetNode string, resType string, vmID int, err error) {
+	if !rxRsID.MatchString(resID) {
+		return "", "", -1, fmt.Errorf("Invalid resource format: %s. Must be node/type/vmID", resID)
 	}
-	idMatch := rxRsId.FindStringSubmatch(resId)
+	idMatch := rxRsID.FindStringSubmatch(resID)
 	targetNode = idMatch[1]
 	resType = idMatch[2]
-	vmId, err = strconv.Atoi(idMatch[3])
+	vmID, err = strconv.Atoi(idMatch[3])
 	return
 }
