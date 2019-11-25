@@ -1,2 +1,5 @@
-test/
 bin/
+test/terraform.d
+test/.terraform
+test/terraform.tfstate*
+*.log
