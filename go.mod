@@ -1,4 +1,4 @@
-module github.com/nextmap-io/terraform-provider-proxmox5
+module github.com/nextmap-io/terraform-provider-proxmox6
 
 go 1.13
 
